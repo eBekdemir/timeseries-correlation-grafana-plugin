@@ -7,6 +7,6 @@ export const plugin = new PanelPlugin(CorrelationPanel).setPanelOptions(builder 
       path: 'windowSize',
       name: 'Correlation Window Size',
       defaultValue: 30,
-      description: 'How many points used for computing rolling correlation'
+      description: 'Pearson Correlation'
     });
 });

@@ -70,10 +70,11 @@
     "@grafana/data": "^12.3.0",
     "@grafana/i18n": "^12.3.0",
     "@grafana/runtime": "^12.3.0",
-    "@grafana/ui": "^12.3.0",
     "@grafana/schema": "^12.3.0",
+    "@grafana/ui": "^12.3.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "react-icons": "^5.5.0"
   },
   "packageManager": "npm@11.5.1"
 }
