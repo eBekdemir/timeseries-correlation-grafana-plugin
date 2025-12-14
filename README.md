@@ -2,12 +2,13 @@
 
 I built a Grafana panel plugin to explore the Pearson correlation between any two or more numeric series directly inside a Grafana dashboard.
 
+![An example visualization](SS.png)
+
 ## What the panel delivers
 - Accept multiple numeric series and a single time field, smooth the raw points, and compute a sliding Pearson correlation window by window.
 - Render the aligned series together with the correlation trace so you can see how synchronously the assets move through time.
 - Provide interactive hovering, zooming, and resizing so findings stay readable even on dense dashboards.
 - Ship battle-tested CSV samples (`example_data/aapl_v1.csv` and `example_data/msft_v1.csv`) for immediate experimentation without wiring an external data source.
-
 ## How it was built
 1. **Grafana panel skeleton** – Generated the standard panel plugin scaffold, implemented `CorrelationPanel.tsx`, and wired it through `src/module.ts` so Grafana can discover and render it like any built‑in visualization.
 2. **Correlation utilities** – Implemented helpers in `src/utils/correlation.ts` to normalize timestamps, smooth noisy series, and calculate a rolling Pearson coefficient that reacts fluidly to the user’s window size option.
@@ -44,6 +45,7 @@ I built a Grafana panel plugin to explore the Pearson correlation between any tw
 5. Resize the panel so both the stacked lines and the correlation strip have enough vertical space.
 6. Hover or click-drag to inspect precise timestamps, paired values, and the correlation coefficient for the currently selected window.
 
+OR just copy the [./dashboard.json](./dashboard.json) and create an example dashboard.
 
 ## What I Implemented
 
@@ -60,6 +62,7 @@ I built a Grafana panel plugin to explore the Pearson correlation between any tw
 
 Additionally:
 - **Example Datasets**: Prepared real financial data samples (Apple and Microsoft stock prices) in [example_data/](example_data/) for immediate testing without external dependencies.
+- **dashboard.json**
 
 ---
 
