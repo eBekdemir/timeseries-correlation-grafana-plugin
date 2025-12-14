@@ -36,7 +36,7 @@ I built a Grafana panel plugin to explore the Pearson correlation between any tw
 
 ## Using the plugin inside Grafana
 1. Create or open a dashboard and add a new panel.
-2. Choose any time-series capable data source (TestData DB  random walk also works).
+2. Choose any time-series capable data source (TestData DB random walk also works).
 3. Switch the visualization to **Analytics**.
 4. Configure two queries that each return a numeric field and share a time field:
    - **CSV Content:** paste the contents of `example_data/aapl_v1.csv` into Query A and `example_data/msft_v1.csv` into Query B using the CSV Content scenario.
@@ -47,5 +47,20 @@ I built a Grafana panel plugin to explore the Pearson correlation between any tw
 
 ## What I Implemented
 
+**Core Functionality:**
+- **Pearson Correlation Algorithm**: Implemented a custom correlation calculation in [src/utils/correlation.ts](src/utils/correlation.ts) that computes the Pearson coefficient across configurable time series (such as stocks history).
+- **Series Smoothing**: Built a moving average smoother to reduce noise in raw time-series data while preserving trends, making correlation patterns more interpretable.
+- **Cointegration Z-Score Analysis**: Added linear regression-based cointegration testing that computes normalized residuals, enabling statistical assessment of long-term relationships between series.
 
-**Enes Bekdemir**
+**Visualization:**
+- **Custom SVG Renderer**: [src/CorrelationPanel.tsx](src/CorrelationPanel.tsx) renders multiple time series with proper scaling, axis generation, and path optimization.
+- **Interactive Tooltips**: Implemented mouse tracking and hover states that display synchronized values across all series plus the instantaneous correlation coefficient at any point in time.
+- **Zoom Interaction**: Created click-drag selection behavior allowing users to zoom in the data.
+- **Responsive Layout**
+
+Additionally:
+- **Example Datasets**: Prepared real financial data samples (Apple and Microsoft stock prices) in [example_data/](example_data/) for immediate testing without external dependencies.
+
+---
+
+<h2 style="border:none">Enes Bekdemir</h2>
