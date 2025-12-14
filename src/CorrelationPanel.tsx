@@ -1,9 +1,8 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { PanelProps } from '@grafana/data';
-import { slidingCorrelation, smoothSeries } from './utils/correlation';
+import { computeCointegrationZScore, slidingCorrelation, smoothSeries } from './utils/correlation';
 
 
-const AXIS_PADDING = 24;
 const SERIES_COLORS = ['#00eaff', '#ff8c00', '#9b59b6', '#2ecc71'];
 
 const getSeriesColor = (index: number) => SERIES_COLORS[index] ?? '#b3b3b3';
@@ -117,7 +116,13 @@ const getSeriesRange = (values: Array<number | null | undefined>) => {
   };
 };
 
-const buildCorrelationPath = (values: Array<number | null>, chartWidth: number, plotHeight: number) => {
+const buildMetricPath = (
+  values: Array<number | null>,
+  chartWidth: number,
+  plotHeight: number,
+  min: number,
+  max: number
+) => {
   if (!values.length) {
     return '';
   }
@@ -125,6 +130,7 @@ const buildCorrelationPath = (values: Array<number | null>, chartWidth: number, 
   const denom = Math.max(values.length - 1, 1);
   let path = '';
   let hasOpenSegment = false;
+  const range = max - min;
 
   values.forEach((value, idx) => {
     if (value === null || !Number.isFinite(value)) {
@@ -133,7 +139,9 @@ const buildCorrelationPath = (values: Array<number | null>, chartWidth: number, 
     }
 
     const x = (idx / denom) * chartWidth;
-    const y = (1 - (value + 1) / 2) * plotHeight;
+    const clamped = Math.min(Math.max(value, min), max);
+    const normalized = range === 0 ? 0.5 : (clamped - min) / range;
+    const y = (1 - normalized) * plotHeight;
     path += `${hasOpenSegment ? ' L ' : 'M '}${x} ${y}`;
     hasOpenSegment = true;
   });
@@ -151,22 +159,68 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
   height,
   options
 }) => {
+  const horizontalPadding = 20;
+  const verticalPadding = 20;
+  const chartWidth = Math.max(width - horizontalPadding, 10);
   const [viewRange, setViewRange] = useState<[number, number]>([0, 1]);
   const [selection, setSelection] = useState<{ start: number | null; end: number | null; width: number }>({
     start: null,
     end: null,
-    width: Math.max(width, 1)
+    width: chartWidth
   });
   const [isSelecting, setIsSelecting] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<{
     timeLabel: string;
-    seriesValues: { name: string; value: number | null }[];
-    correlation: number | null;
+    seriesValues: Array<{ name: string; value: number | null }>;
+    metrics: { correlation: number | null; cointegration: number | null };
     pointer: { x: number; y: number };
   } | null>(null);
+  const [metricMode, setMetricMode] = useState<'correlation' | 'cointegration'>('correlation');
+  const [topSeriesMode, setTopSeriesMode] = useState<'relative' | 'normal'>('relative');
   const [tooltipSize, setTooltipSize] = useState({ width: 0, height: 0 });
+  const [chromeHeight, setChromeHeight] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const chromeRef = useRef<HTMLDivElement | null>(null);
   const hoverRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (hoverInfo && hoverRef.current) {
+      const rect = hoverRef.current.getBoundingClientRect();
+      setTooltipSize(prev => {
+        if (prev.width === rect.width && prev.height === rect.height) {
+          return prev;
+        }
+        return { width: rect.width, height: rect.height };
+      });
+    } else if (!hoverInfo && (tooltipSize.width !== 0 || tooltipSize.height !== 0)) {
+      setTooltipSize({ width: 0, height: 0 });
+    }
+  }, [hoverInfo, tooltipSize.width, tooltipSize.height]);
+
+  useLayoutEffect(() => {
+    if (!chromeRef.current) {
+      return;
+    }
+
+    const measure = () => {
+      if (!chromeRef.current) {
+        return;
+      }
+      const rect = chromeRef.current.getBoundingClientRect();
+      setChromeHeight(rect.height);
+    };
+
+    measure();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => {
+        measure();
+      });
+      observer.observe(chromeRef.current);
+      return () => observer.disconnect();
+    }
+
+    return;
+  }, [width, height]);
 
   /** -------------------------
    * Extract ALL time and numeric fields
@@ -217,6 +271,8 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
   const rawCorrelation = slidingCorrelation(series[0].values, series[1].values, window);
   const smoothingRadius = Math.max(1, Math.floor(window / 8));
   const correlation = smoothSeries(rawCorrelation, smoothingRadius);
+  const rawCointegration = computeCointegrationZScore(series[0].values, series[1].values, window);
+  const cointegration = smoothSeries(rawCointegration, smoothingRadius);
 
   /** -------------------------
    * Zoom helpers
@@ -234,29 +290,26 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
     return (1 - (v - min) / (max - min)) * h;
   };
 
-  const chartWidth = Math.max(width, 1);
-  const topHeight = height * 0.6;
-  const bottomHeight = height * 0.3;
-  const seriesPlotHeight = Math.max(topHeight, 10);
-  const corrPlotHeight = Math.max(bottomHeight - AXIS_PADDING, 10);
+  const availablePlotHeight = Math.max(height - chromeHeight - verticalPadding, 0);
+  let topHeight = availablePlotHeight * 0.62;
+  let bottomHeight = availablePlotHeight - topHeight;
+  if (availablePlotHeight >= 120 && topHeight < 60) {
+    topHeight = 60;
+    bottomHeight = Math.max(availablePlotHeight - topHeight, 0);
+  }
+  if (availablePlotHeight >= 120 && bottomHeight < 60) {
+    bottomHeight = 60;
+    topHeight = Math.max(availablePlotHeight - bottomHeight, 0);
+  }
+  const seriesPlotHeight = Math.max(topHeight, 0);
+  const maxAxisPadding = Math.max(bottomHeight - 20, 0);
+  const bottomAxisPadding = Math.min(Math.max(bottomHeight * 0.2, 24), maxAxisPadding); // reserve room for ticks
+  let corrPlotHeight = bottomHeight <= 0 ? 0 : Math.max(bottomHeight - bottomAxisPadding, 0);
+  corrPlotHeight = Math.min(corrPlotHeight, bottomHeight);
 
   const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
   const minViewSpan = timestamps.length ? 1 / Math.max(timestamps.length, 1) : 0.001;
-
-  useLayoutEffect(() => {
-    if (hoverInfo && hoverRef.current) {
-      const rect = hoverRef.current.getBoundingClientRect();
-      setTooltipSize(prev => {
-        if (prev.width === rect.width && prev.height === rect.height) {
-          return prev;
-        }
-        return { width: rect.width, height: rect.height };
-      });
-    } else if (!hoverInfo && (tooltipSize.width !== 0 || tooltipSize.height !== 0)) {
-      setTooltipSize({ width: 0, height: 0 });
-    }
-  }, [hoverInfo, tooltipSize.width, tooltipSize.height]);
 
   const updateHoverState = (localX: number, localWidth: number, pointer: { x: number; y: number } | null) => {
     if (!timestamps.length || !pointer) {
@@ -274,10 +327,14 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
       dataIndex < correlation.length && typeof correlation[dataIndex] === 'number'
         ? correlation[dataIndex]
         : null;
+    const cointegrationValue =
+      dataIndex < cointegration.length && typeof cointegration[dataIndex] === 'number'
+        ? cointegration[dataIndex]
+        : null;
     setHoverInfo({
       timeLabel: formatTimestamp(timeValue),
       seriesValues: seriesValuesAtPointer,
-      correlation: correlationValue,
+      metrics: { correlation: correlationValue, cointegration: cointegrationValue },
       pointer
     });
   };
@@ -388,6 +445,38 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
     };
   });
 
+  const combinedSeriesRange = (() => {
+    const values: number[] = [];
+    for (const s of visibleSeries) {
+      for (const value of s.visibleValues) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          values.push(value);
+        }
+      }
+    }
+    if (!values.length) {
+      return null;
+    }
+    return {
+      min: Math.min(...values),
+      max: Math.max(...values)
+    };
+  })();
+
+  const normalizedCombinedRange = (() => {
+    if (!combinedSeriesRange) {
+      return null;
+    }
+    if (combinedSeriesRange.min === combinedSeriesRange.max) {
+      const padding = Math.max(Math.abs(combinedSeriesRange.min) * 0.05, 1);
+      return {
+        min: combinedSeriesRange.min - padding,
+        max: combinedSeriesRange.max + padding
+      };
+    }
+    return combinedSeriesRange;
+  })();
+
   const visibleCorrelation = (() => {
     if (!correlation.length) {
       return [];
@@ -396,7 +485,30 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
     const end = Math.min(endIndex, correlation.length - 1);
     return correlation.slice(start, end + 1);
   })();
-  const correlationPath = buildCorrelationPath(visibleCorrelation, chartWidth, corrPlotHeight);
+  const visibleCointegration = (() => {
+    if (!cointegration.length) {
+      return [];
+    }
+    const start = Math.min(startIndex, cointegration.length - 1);
+    const end = Math.min(endIndex, cointegration.length - 1);
+    return cointegration.slice(start, end + 1);
+  })();
+  const metricSeries = metricMode === 'correlation' ? visibleCorrelation : visibleCointegration;
+
+  const metricRange =
+    metricMode === 'correlation'
+      ? { min: -1, max: 1 }
+      : (() => {
+          const range = getSeriesRange(metricSeries);
+          if (!range) {
+            return { min: -5, max: 5 };
+          }
+          const maxAbs = Math.max(Math.abs(range.min), Math.abs(range.max));
+          const padded = Math.max(maxAbs * 1.1, 1);
+          return { min: -padded, max: padded };
+        })();
+
+  const metricPath = buildMetricPath(metricSeries, chartWidth, corrPlotHeight, metricRange.min, metricRange.max);
 
   const visibleTimestamps = (() => {
     if (!timestamps.length) {
@@ -420,13 +532,21 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
     : [];
   const firstSeriesColor = getSeriesColor(0);
   const secondSeriesColor = getSeriesColor(1);
+  const sharedAxisTicks =
+    topSeriesMode === 'normal' && normalizedCombinedRange
+      ? buildValueTicks(normalizedCombinedRange.min, normalizedCombinedRange.max, seriesPlotHeight)
+      : [];
 
-  const correlationAxisTicks = buildValueTicks(-1, 1, corrPlotHeight);
+  const metricAxisTicks = buildValueTicks(metricRange.min, metricRange.max, corrPlotHeight);
+  const zeroLineY =
+    metricRange.max === metricRange.min
+      ? corrPlotHeight / 2
+      : (1 - (0 - metricRange.min) / (metricRange.max - metricRange.min)) * corrPlotHeight;
 
   const selectionX = selectionActive ? Math.min(selection.start!, selection.end!) : 0;
   const selectionWidth = selectionActive ? Math.abs((selection.end ?? 0) - (selection.start ?? 0)) : 0;
   const leftAxisX = 0;
-  const rightAxisX = Math.max(width - 1, 0);
+  const rightAxisX = Math.max(chartWidth - 1, 0);
 
   const canZoomOut = !(viewRange[0] === 0 && viewRange[1] === 1);
   const canZoomIn = viewRange[1] - viewRange[0] > minViewSpan * 1.2;
@@ -442,15 +562,29 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
     width: 32,
     height: 32
   };
+  const floatingToggleButtonStyle: React.CSSProperties = {
+    position: 'absolute',
+    left: 8,
+    top: 8,
+    padding: '4px 10px',
+    background: 'rgba(51, 51, 51, 0.9)',
+    color: '#fff',
+    border: '1px solid #555',
+    borderRadius: 4,
+    cursor: 'pointer',
+    zIndex: 10,
+    fontSize: 11
+  };
 
+  const metricModeLabel =
+    metricMode === 'correlation' ? 'Rolling correlation' : 'Cointegration z-score';
   const tooltipPosition = (() => {
-    if (!hoverInfo || !containerRef.current) {
+    if (!hoverInfo) {
       return null;
     }
-    const bounds = containerRef.current.getBoundingClientRect();
     const offset = 12;
-    const availableWidth = Math.max(bounds.width - 4, 0);
-    const availableHeight = Math.max(bounds.height - 4, 0);
+    const availableWidth = Math.max(width - 4, 0);
+    const availableHeight = Math.max(height - 4, 0);
     const tooltipWidth = tooltipSize.width || 0;
     const tooltipHeight = tooltipSize.height || 0;
     let left = hoverInfo.pointer.x + offset;
@@ -472,9 +606,32 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
 
     return { left, top };
   })();
+  const activeMetricValue =
+    hoverInfo === null
+      ? null
+      : metricMode === 'correlation'
+          ? hoverInfo.metrics.correlation
+          : hoverInfo.metrics.cointegration;
+
+  const dateLabelHeight = 16;
+  const dateLabelY = Math.max(corrPlotHeight + 12, bottomHeight - dateLabelHeight - 4);
+  const timeAxisLabelY = Math.max(corrPlotHeight + 6, Math.min(corrPlotHeight + 10, dateLabelY - 4));
 
   return (
-    <div ref={containerRef} style={{ width, height, padding: 10, position: 'relative' }}>
+    <div
+      ref={containerRef}
+      style={{
+        width,
+        height,
+        padding: 10,
+        position: 'relative',
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        overflow: 'hidden'
+      }}
+    >
       {hoverInfo && tooltipPosition && (
         <div
           ref={hoverRef}
@@ -482,12 +639,14 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
             position: 'absolute',
             left: tooltipPosition.left,
             top: tooltipPosition.top,
-            background: 'rgba(0,0,0,0.7)',
+            background: 'rgba(0,0,0,0.9)',
             color: '#fff',
             padding: '8px 12px',
             borderRadius: 4,
             fontSize: 12,
-            pointerEvents: 'none'
+            pointerEvents: 'none',
+            zIndex: 1000,
+            border: '1px solid rgba(255,255,255,0.2)'
           }}
         >
           <div>Time: {hoverInfo.timeLabel}</div>
@@ -497,177 +656,314 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
             </div>
           ))}
           <div>
-            Correlation: {hoverInfo.correlation === null ? 'N/A' : hoverInfo.correlation.toFixed(3)}
+            {metricModeLabel}: {activeMetricValue === null ? 'N/A' : activeMetricValue.toFixed(3)}
           </div>
         </div>
       )}
-      <h3 style={{ color: '#ddd' }}>
-        Enes Bekdemir - 2025502000
-      </h3>
-      <h3 style={{ color: '#ddd', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        Rolling Pearson Correlation: {series[0].name} vs {series[1].name}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={handleZoomOut}
-            disabled={!canZoomOut}
-            style={{
-              ...zoomButtonStyle,
-              cursor: canZoomOut ? 'pointer' : 'not-allowed',
-              opacity: canZoomOut ? 1 : 0.4
-            }}
-            aria-label="Zoom out"
-            title="Zoom out"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" fill="none" strokeWidth="1.5" />
-              <line x1="4" y1="6.5" x2="9" y2="6.5" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="9.5" y1="9.5" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            onClick={handleZoomIn}
-            disabled={!canZoomIn}
-            style={{
-              ...zoomButtonStyle,
-              cursor: canZoomIn ? 'pointer' : 'not-allowed',
-              opacity: canZoomIn ? 1 : 0.4
-            }}
-            aria-label="Zoom in"
-            title="Zoom in"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" fill="none" strokeWidth="1.5" />
-              <line x1="4" y1="6.5" x2="9" y2="6.5" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="6.5" y1="4" x2="6.5" y2="9" stroke="currentColor" strokeWidth="1.5" />
-              <line x1="9.5" y1="9.5" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            onClick={resetZoom}
-            disabled={!canZoomOut}
-            style={{
-              padding: '4px 8px',
-              background: '#333',
-              color: '#fff',
-              border: '1px solid #555',
-              borderRadius: 4,
-              cursor: canZoomOut ? 'pointer' : 'not-allowed'
-            }}
-          >
-            Reset zoom
-          </button>
-        </div>
-      </h3>
-
-      <div style={{ display: 'flex', gap: 16, marginBottom: 8, color: '#ddd', flexWrap: 'wrap' }}>
-        {series.slice(0, 2).map((s, idx) => (
-          <div key={`${s.name}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span
+      <div ref={chromeRef} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* <h3 style={{ color: '#ddd', margin: 0 }}>
+          
+        </h3> */}
+        <h3
+          style={{
+            color: '#ddd',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            margin: 0
+          }}
+        >
+          Enes Bekdemir - 2025502000 - Rolling Pearson Correlation: {series[0].name} vs {series[1].name}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={handleZoomOut}
+              disabled={!canZoomOut}
               style={{
-                width: 12,
-                height: 12,
-                borderRadius: 2,
-                background: getSeriesColor(idx),
-                display: 'inline-block'
+                ...zoomButtonStyle,
+                cursor: canZoomOut ? 'pointer' : 'not-allowed',
+                opacity: canZoomOut ? 1 : 0.4
               }}
-            />
-            <span>{s.name}</span>
+              aria-label="Zoom out"
+              title="Zoom out"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" fill="none" strokeWidth="1.5" />
+                <line x1="4" y1="6.5" x2="9" y2="6.5" stroke="currentColor" strokeWidth="1.5" />
+                <line x1="9.5" y1="9.5" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button
+              onClick={handleZoomIn}
+              disabled={!canZoomIn}
+              style={{
+                ...zoomButtonStyle,
+                cursor: canZoomIn ? 'pointer' : 'not-allowed',
+                opacity: canZoomIn ? 1 : 0.4
+              }}
+              aria-label="Zoom in"
+              title="Zoom in"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" fill="none" strokeWidth="1.5" />
+                <line x1="4" y1="6.5" x2="9" y2="6.5" stroke="currentColor" strokeWidth="1.5" />
+                <line x1="6.5" y1="4" x2="6.5" y2="9" stroke="currentColor" strokeWidth="1.5" />
+                <line x1="9.5" y1="9.5" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button
+              onClick={resetZoom}
+              disabled={!canZoomOut}
+              style={{
+                padding: '4px 8px',
+                background: '#333',
+                color: '#fff',
+                border: '1px solid #555',
+                borderRadius: 4,
+                cursor: canZoomOut ? 'pointer' : 'not-allowed'
+              }}
+            >
+              Reset zoom
+            </button>
           </div>
-        ))}
+        </h3>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 16,
+            color: '#ddd',
+            flexWrap: 'wrap'
+          }}
+        >
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+            {series.slice(0, 2).map((s, idx) => (
+              <div key={`${s.name}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: 2,
+                    background: getSeriesColor(idx),
+                    display: 'inline-block'
+                  }}
+                />
+                <span>{s.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {/* --- Top chart: the actual random walk series --- */}
-      <svg
-        width={width}
-        height={topHeight}
-        style={{ background: '#111', cursor: 'crosshair' }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-      >
-        {visibleSeries.map((s, idx) => {
-          const visibleValues = s.visibleValues.length ? s.visibleValues : [];
-          if (!visibleValues.length) {
-            return null;
-          }
-          const min = Math.min(...visibleValues);
-          const max = Math.max(...visibleValues);
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ position: 'relative', flex: '0 0 auto', height: topHeight }}>
+          <button
+            onClick={() => setTopSeriesMode(topSeriesMode === 'relative' ? 'normal' : 'relative')}
+            style={floatingToggleButtonStyle}
+          >
+            {topSeriesMode === 'relative' ? 'Relative values' : 'Real values'}
+          </button>
+          {/* --- Top chart: the actual series --- */}
+          <svg
+            width={chartWidth}
+            height={topHeight}
+            style={{ background: '#111', cursor: 'crosshair', display: 'block' }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseLeave}
+          >
+          {visibleSeries.map((s, idx) => {
+            const visibleValues = s.visibleValues.length ? s.visibleValues : [];
+            if (!visibleValues.length) {
+              return null;
+            }
+            const localRange =
+              topSeriesMode === 'normal' && normalizedCombinedRange
+                ? normalizedCombinedRange
+                : (() => {
+                    const min = Math.min(...visibleValues);
+                    const max = Math.max(...visibleValues);
+                    if (min === max) {
+                      const padding = Math.max(Math.abs(min) * 0.05, 1);
+                      return { min: min - padding, max: max + padding };
+                    }
+                    return { min, max };
+                  })();
 
-          const path = visibleValues
-            .map((v, i) => {
-              const denom = Math.max(visibleValues.length - 1, 1);
-              const x = (i / denom) * width;
-              const y = normalize(v, min, max, seriesPlotHeight);
-              return `${x},${y}`;
-            })
-            .join(' L ');
+            const path = visibleValues
+              .map((v, i) => {
+                const denom = Math.max(visibleValues.length - 1, 1);
+                const x = (i / denom) * chartWidth;
+                const y = normalize(v, localRange.min, localRange.max, seriesPlotHeight);
+                return `${x},${y}`;
+              })
+              .join(' L ');
 
-          return (
-            <path
-              key={idx}
-              d={`M ${path}`}
-              stroke={getSeriesColor(idx)}
-              fill="none"
-              strokeWidth={idx <= 1 ? 2 : 1}
+            return (
+              <path
+                key={idx}
+                d={`M ${path}`}
+                stroke={getSeriesColor(idx)}
+                fill="none"
+                strokeWidth={idx <= 1 ? 2 : 1}
+              />
+            );
+          })}
+          {selectionActive && (
+            <rect
+              x={selectionX}
+              y={0}
+              width={selectionWidth}
+              height={seriesPlotHeight}
+              fill="rgba(255, 255, 255, 0.1)"
+              stroke="#fff"
+              strokeDasharray="4"
             />
-          );
-        })}
-        {selectionActive && (
-          <rect
-            x={selectionX}
-            y={0}
-            width={selectionWidth}
-            height={seriesPlotHeight}
-            fill="rgba(255, 255, 255, 0.1)"
-            stroke="#fff"
-            strokeDasharray="4"
-          />
-        )}
-        {firstSeriesTicks.length > 0 && (
-          <g>
-            <line x1={leftAxisX} y1={0} x2={leftAxisX} y2={seriesPlotHeight} stroke="#333" strokeWidth={1} />
-            {firstSeriesTicks.map((tick, idx) => (
-              <g key={`left-value-axis-${idx}`}>
-                <line
-                  x1={leftAxisX}
-                  y1={tick.y}
-                  x2={leftAxisX + 6}
-                  y2={tick.y}
-                  stroke={firstSeriesColor}
-                  strokeWidth={1}
-                />
-                <text
-                  x={leftAxisX + 8}
-                  y={tick.y}
-                  fill={firstSeriesColor}
-                  fontSize={10}
-                  textAnchor="start"
-                  dominantBaseline="middle"
-                >
-                  {tick.label}
-                </text>
+          )}
+          {topSeriesMode === 'relative' && firstSeriesTicks.length > 0 && (
+            <g>
+              <line x1={leftAxisX} y1={0} x2={leftAxisX} y2={seriesPlotHeight} stroke="#333" strokeWidth={1} />
+              {firstSeriesTicks.map((tick, idx) => (
+                <g key={`left-value-axis-${idx}`}>
+                  <line
+                    x1={leftAxisX}
+                    y1={tick.y}
+                    x2={leftAxisX + 6}
+                    y2={tick.y}
+                    stroke={firstSeriesColor}
+                    strokeWidth={1}
+                  />
+                  <text
+                    x={leftAxisX + 8}
+                    y={tick.y}
+                    fill={firstSeriesColor}
+                    fontSize={10}
+                    textAnchor="start"
+                    dominantBaseline="middle"
+                  >
+                    {tick.label}
+                  </text>
+                </g>
+              ))}
+            </g>
+          )}
+          {topSeriesMode === 'relative' && secondSeriesTicks.length > 0 && (
+            <g>
+              <line x1={rightAxisX} y1={0} x2={rightAxisX} y2={seriesPlotHeight} stroke="#333" strokeWidth={1} />
+              {secondSeriesTicks.map((tick, idx) => (
+                <g key={`right-value-axis-${idx}`}>
+                  <line
+                    x1={rightAxisX - 6}
+                    y1={tick.y}
+                    x2={rightAxisX}
+                    y2={tick.y}
+                    stroke={secondSeriesColor}
+                    strokeWidth={1}
+                  />
+                  <text
+                    x={rightAxisX - 8}
+                    y={tick.y}
+                    fill={secondSeriesColor}
+                    fontSize={10}
+                    textAnchor="end"
+                    dominantBaseline="middle"
+                  >
+                    {tick.label}
+                  </text>
+                </g>
+              ))}
+            </g>
+          )}
+          {topSeriesMode === 'normal' && sharedAxisTicks.length > 0 && (
+            <g>
+              <line x1={rightAxisX} y1={0} x2={rightAxisX} y2={seriesPlotHeight} stroke="#333" strokeWidth={1} />
+              {sharedAxisTicks.map((tick, idx) => (
+                <g key={`shared-value-axis-${idx}`}>
+                  <line
+                    x1={rightAxisX - 6}
+                    y1={tick.y}
+                    x2={rightAxisX}
+                    y2={tick.y}
+                    stroke="#bbb"
+                    strokeWidth={1}
+                  />
+                  <text
+                    x={rightAxisX - 8}
+                    y={tick.y}
+                    fill="#bbb"
+                    fontSize={10}
+                    textAnchor="end"
+                    dominantBaseline="middle"
+                  >
+                    {tick.label}
+                  </text>
+                </g>
+              ))}
+            </g>
+          )}
+        </svg>
+
+        </div>
+
+        {/* --- Bottom chart: metric --- */}
+        <div
+          style={{ position: 'relative', flex: '0 0 auto', height: bottomHeight }}
+          onMouseLeave={handleMouseLeave}
+        >
+          <button
+            onClick={() => setMetricMode(metricMode === 'correlation' ? 'cointegration' : 'correlation')}
+            style={floatingToggleButtonStyle}
+          >
+            {metricModeLabel}
+          </button>
+          <svg
+            width={chartWidth}
+            height={bottomHeight}
+            style={{ background: '#222', cursor: 'crosshair', display: 'block' }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseEnter={handleMouseMove}
+          >
+            <defs>
+              <clipPath id="metricClipPath">
+                <rect x={0} y={0} width={chartWidth} height={corrPlotHeight} />
+              </clipPath>
+            </defs>
+            <rect x={0} y={0} width={chartWidth} height={corrPlotHeight} fill="#222" />
+            <line x1={0} y1={zeroLineY} x2={chartWidth} y2={zeroLineY} stroke="#666" strokeDasharray="4" strokeWidth={1} />
+            {metricPath && (
+              <g clipPath="url(#metricClipPath)">
+                <path d={metricPath} stroke="#60cfff" strokeWidth={2} fill="none" />
               </g>
-            ))}
-          </g>
-        )}
-        {secondSeriesTicks.length > 0 && (
-          <g>
-            <line x1={rightAxisX} y1={0} x2={rightAxisX} y2={seriesPlotHeight} stroke="#333" strokeWidth={1} />
-            {secondSeriesTicks.map((tick, idx) => (
-              <g key={`right-value-axis-${idx}`}>
+            )}
+            {selectionActive && (
+              <rect
+                x={selectionX}
+                y={0}
+                width={selectionWidth}
+                height={corrPlotHeight}
+                fill="rgba(255, 255, 255, 0.08)"
+                stroke="#fff"
+                strokeDasharray="4"
+              />
+            )}
+            <line x1={rightAxisX} y1={0} x2={rightAxisX} y2={corrPlotHeight} stroke="#333" strokeWidth={1} />
+            {metricAxisTicks.map((tick, idx) => (
+              <g key={`corr-value-axis-${idx}`}>
                 <line
                   x1={rightAxisX - 6}
                   y1={tick.y}
                   x2={rightAxisX}
                   y2={tick.y}
-                  stroke={secondSeriesColor}
+                  stroke="#555"
                   strokeWidth={1}
                 />
                 <text
                   x={rightAxisX - 8}
                   y={tick.y}
-                  fill={secondSeriesColor}
+                  fill="#bbb"
                   fontSize={10}
                   textAnchor="end"
                   dominantBaseline="middle"
@@ -676,86 +972,32 @@ export const CorrelationPanel: React.FC<PanelProps<PanelOptions>> = ({
                 </text>
               </g>
             ))}
-          </g>
-        )}
-      </svg>
-
-      {/* --- Bottom chart: correlation --- */}
-      <svg
-        width={width}
-        height={bottomHeight}
-        style={{ background: '#222', cursor: 'crosshair' }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-      >
-        {correlationPath && (
-          <path
-            d={correlationPath}
-            stroke="#60cfff"
-            strokeWidth={2}
-            fill="none"
-          />
-        )}
-        {selectionActive && (
-          <rect
-            x={selectionX}
-            y={0}
-            width={selectionWidth}
-            height={corrPlotHeight}
-            fill="rgba(255, 255, 255, 0.08)"
-            stroke="#fff"
-            strokeDasharray="4"
-          />
-        )}
-        <line x1={rightAxisX} y1={0} x2={rightAxisX} y2={corrPlotHeight} stroke="#333" strokeWidth={1} />
-        {correlationAxisTicks.map((tick, idx) => (
-          <g key={`corr-value-axis-${idx}`}>
-            <line
-              x1={rightAxisX - 6}
-              y1={tick.y}
-              x2={rightAxisX}
-              y2={tick.y}
-              stroke="#555"
-              strokeWidth={1}
-            />
-            <text
-              x={rightAxisX - 8}
-              y={tick.y}
-              fill="#bbb"
-              fontSize={10}
-              textAnchor="end"
-              dominantBaseline="middle"
-            >
-              {tick.label}
-            </text>
-          </g>
-        ))}
-        <line x1={0} y1={corrPlotHeight} x2={width} y2={corrPlotHeight} stroke="#333" strokeWidth={1} />
-        {timeAxisTicks.map((tick, idx) => (
-          <g key={`corr-axis-${idx}`}>
-            <line
-              x1={tick.x}
-              y1={corrPlotHeight}
-              x2={tick.x}
-              y2={corrPlotHeight + 6}
-              stroke="#555"
-              strokeWidth={1}
-            />
-            <text
-              x={tick.x}
-              y={corrPlotHeight + 8}
-              fill="#bbb"
-              fontSize={10}
-              textAnchor="middle"
-              dominantBaseline="hanging"
-            >
-              {tick.label}
-            </text>
-          </g>
-        ))}
-      </svg>
+            <line x1={0} y1={corrPlotHeight} x2={chartWidth} y2={corrPlotHeight} stroke="#333" strokeWidth={1} />
+            {timeAxisTicks.map((tick, idx) => (
+              <g key={`corr-axis-${idx}`}>
+                <line
+                  x1={tick.x}
+                  y1={corrPlotHeight}
+                  x2={tick.x}
+                  y2={corrPlotHeight + 6}
+                  stroke="#555"
+                  strokeWidth={1}
+                />
+                <text
+                  x={tick.x}
+                  y={timeAxisLabelY}
+                  fill="#bbb"
+                  fontSize={10}
+                  textAnchor="middle"
+                  dominantBaseline="hanging"
+                >
+                  {tick.label}
+                </text>
+              </g>
+            ))}
+          </svg>
+        </div>
+      </div>
     </div>
   );
 };

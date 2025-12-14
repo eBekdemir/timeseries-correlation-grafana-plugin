@@ -74,3 +74,111 @@ export function smoothSeries(values: Array<number | null>, radius: number): Arra
     return count > 0 ? sum / count : null;
   });
 }
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+
+const performLinearRegression = (seriesA: number[], seriesB: number[]) => {
+  const length = Math.min(seriesA.length, seriesB.length);
+  const pairs: Array<{ a: number; b: number }> = [];
+
+  for (let i = 0; i < length; i++) {
+    const a = seriesA[i];
+    const b = seriesB[i];
+    if (!isFiniteNumber(a) || !isFiniteNumber(b)) {
+      continue;
+    }
+    pairs.push({ a, b });
+  }
+
+  if (pairs.length < 2) {
+    return { alpha: 0, beta: 0, valid: false } as const;
+  }
+
+  const n = pairs.length;
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+
+  for (const pair of pairs) {
+    sumX += pair.b;
+    sumY += pair.a;
+    sumXY += pair.a * pair.b;
+    sumXX += pair.b * pair.b;
+  }
+
+  const denominator = n * sumXX - sumX * sumX;
+  if (denominator === 0) {
+    const meanY = sumY / n;
+    return { alpha: meanY, beta: 0, valid: true } as const;
+  }
+
+  const beta = (n * sumXY - sumX * sumY) / denominator;
+  const alpha = (sumY - beta * sumX) / n;
+  return { alpha, beta, valid: true } as const;
+};
+
+export function computeCointegrationZScore(
+  seriesA: number[],
+  seriesB: number[],
+  window: number
+): Array<number | null> {
+  const length = Math.min(seriesA.length, seriesB.length);
+  const residuals: Array<number | null> = new Array(length).fill(null);
+  if (!length) {
+    return residuals;
+  }
+
+  const regression = performLinearRegression(seriesA, seriesB);
+  if (!regression.valid) {
+    return residuals;
+  }
+
+  for (let i = 0; i < length; i++) {
+    const a = seriesA[i];
+    const b = seriesB[i];
+    if (!isFiniteNumber(a) || !isFiniteNumber(b)) {
+      continue;
+    }
+    residuals[i] = a - (regression.alpha + regression.beta * b);
+  }
+
+  const safeWindow = Math.max(Math.floor(window), 2);
+  const zscores: Array<number | null> = new Array(length).fill(null);
+
+  for (let i = 0; i < length; i++) {
+    const currentResidual = residuals[i];
+    if (i < safeWindow - 1 || currentResidual === null) {
+      zscores[i] = null;
+      continue;
+    }
+
+    const start = Math.max(0, i - (safeWindow - 1));
+    const slice: number[] = [];
+    for (let idx = start; idx <= i; idx++) {
+      const value = residuals[idx];
+      if (value === null || !Number.isFinite(value)) {
+        continue;
+      }
+      slice.push(value);
+    }
+
+    if (slice.length < 2) {
+      zscores[i] = null;
+      continue;
+    }
+
+    const mean = slice.reduce((acc, val) => acc + val, 0) / slice.length;
+    const variance = slice.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / slice.length;
+    const std = Math.sqrt(variance);
+
+    if (!Number.isFinite(std) || std === 0) {
+      zscores[i] = null;
+      continue;
+    }
+
+    zscores[i] = (currentResidual - mean) / std;
+  }
+
+  return zscores;
+}
