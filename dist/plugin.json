@@ -18,11 +18,11 @@
         "links": [],
         "screenshots": [],
         "version": "1.0.0",
-        "updated": "2025-12-14"
+        "updated": "2025-12-27"
     },
     "dependencies": {
         "grafanaDependency": ">=10.4.0",
         "plugins": []
     },
-    "buildMode": "production"
+    "buildMode": "development"
 }
